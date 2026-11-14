@@ -34,6 +34,14 @@ import { AnalysisType } from "@/components/analysis-type"
 import { resolveDynamicChartRecommendation } from "@/components/chart-selection-step"
 import { StoryDashboard } from "@/components/story-dashboard"
 import { DATASET_REGISTRY, DatasetMeta, ColumnDefinition } from "@/lib/dataset-models"
+import { datasetApi, analysisApi, ANALYSIS_TYPE_MAP } from "@/lib/api"
+import {
+  buildDatasetMetaFromBackend,
+  buildValidationReportFromBackend,
+  applyAiColumnRecommendation,
+  mapCleaningToStrategies,
+  backendTypeToFrontendId,
+} from "@/lib/backend-mappers"
 
 // ==============================================================================
 // 1. Data Cleaning & Re-validation Helper Functions
@@ -856,49 +864,68 @@ export function UploadWorkspace({ userName = "Shahad Saif" }: { userName?: strin
   // 🔴 END DEMO / SIMULATION CODE
   // ==============================================================================
 
-  function handleFileSelect(file: File | undefined) {
+  // ==============================================================================
+  // Backend upload: POST /dataset/test-upload (quality report) + POST /dataset/upload
+  // (persist for the user), then GET /dataset/:id/preview for duplicate rows.
+  // ==============================================================================
+  async function handleFileSelect(file: File | undefined) {
     if (!file) return
     if (!isFileSupported(file.name)) {
       setModalState({ isOpen: true, title: "Invalid File Format", message: `The file "${file.name}" is not supported.` })
       return
     }
 
-    // Extract headers when uploaded file is CSV
-    if (file.name.endsWith(".csv")) {
-      const reader = new FileReader()
-      reader.onload = (e) => {
-        const text = e.target?.result as string
-        if (text) {
-          const firstLine = text.split("\n")[0]
-          const headers = firstLine ? firstLine.split(",") : []
-          startUploadSimulation(
-            {
-              name: file.name,
-              size: formatBytes(file.size),
-              type: "CSV",
-              rowCount: Math.floor(Math.random() * 1800) + 400,
-              colCount: headers.length || 8,
-            },
-            headers
+    const fileInfo = {
+      name: file.name,
+      size: formatBytes(file.size),
+      type: getFileExtension(file.name).replace(".", "").toUpperCase(),
+    }
+
+    setUploadNotice(null)
+    setSelectedFile(fileInfo)
+    setUploadStatus("uploading")
+    setUploadProgress(5)
+
+    // Progress indicator while the server processes the file
+    if (timerRef.current) clearInterval(timerRef.current)
+    timerRef.current = setInterval(() => {
+      setUploadProgress((p) => (p < 90 ? p + Math.floor(Math.random() * 8) + 3 : p))
+    }, 250)
+
+    try {
+      const [inspect, saved] = await Promise.all([datasetApi.inspect(file), datasetApi.upload(file)])
+      const preview = await datasetApi.preview(saved.dataset_id).catch(() => null)
+
+      const meta = buildDatasetMetaFromBackend(fileInfo, inspect, saved.dataset_id)
+      const report = buildValidationReportFromBackend(inspect, preview)
+
+      if (timerRef.current) clearInterval(timerRef.current)
+      setSelectedFile({ ...fileInfo, rowCount: meta.rowCount, colCount: meta.colCount })
+      setActiveDataset(meta)
+      setValidationReport(report)
+      setUploadProgress(100)
+      setUploadStatus("complete")
+      setIsValidationOpen(true)
+
+      // AI column recommendation (Gemini) runs in the background
+      datasetApi
+        .aiRecommendColumns(saved.dataset_id)
+        .then((rec) => {
+          setActiveDataset((prev) =>
+            prev && prev.backendId === saved.dataset_id ? applyAiColumnRecommendation(prev, rec) : prev
           )
-        } else {
-          startUploadSimulation({
-            name: file.name,
-            size: formatBytes(file.size),
-            type: "CSV",
-            rowCount: 1200,
-            colCount: 8,
-          })
-        }
-      }
-      reader.readAsText(file.slice(0, 4096))
-    } else {
-      startUploadSimulation({
-        name: file.name,
-        size: formatBytes(file.size),
-        type: getFileExtension(file.name).replace(".", "").toUpperCase(),
-        rowCount: Math.floor(Math.random() * 2500) + 350,
-        colCount: Math.floor(Math.random() * 8) + 6,
+        })
+        .catch(() => {})
+    } catch (err: any) {
+      if (timerRef.current) clearInterval(timerRef.current)
+      setUploadStatus("idle")
+      setSelectedFile(null)
+      setUploadProgress(0)
+      if (fileInputRef.current) fileInputRef.current.value = ""
+      setModalState({
+        isOpen: true,
+        title: "Upload Failed",
+        message: err?.message || "The dataset could not be uploaded.",
       })
     }
   }
@@ -923,8 +950,26 @@ export function UploadWorkspace({ userName = "Shahad Saif" }: { userName?: strin
    * a) Apply cleaning decisions to columns (rename, merge, purge exact, exclude)
    * b) Re-validate dataset and issue certified clean quality report
    */
-  function handleApplyCleaningAndRecheck(decisions: CleaningDecisions) {
+  async function handleApplyCleaningAndRecheck(decisions: CleaningDecisions) {
     if (!activeDataset) return
+
+    // Persist missing-value cleaning on the backend for real uploads
+    if (activeDataset.backendId) {
+      const strategies = mapCleaningToStrategies(decisions, validationReport)
+      if (Object.keys(strategies).length > 0) {
+        try {
+          await datasetApi.cleanMissing(activeDataset.backendId, strategies)
+        } catch (err: any) {
+          setIsCleaningOpen(false)
+          setModalState({
+            isOpen: true,
+            title: "Cleaning Failed",
+            message: err?.message || "The cleaning rules could not be applied on the server.",
+          })
+          return
+        }
+      }
+    }
 
     // a) Apply column modifications
     const updatedColumns = applyCleaningDecisionsToColumns(
@@ -1146,7 +1191,39 @@ export function UploadWorkspace({ userName = "Shahad Saif" }: { userName?: strin
             goalBundles={activeDataset?.goalBundles}
             datasetName={activeDataset?.name}
             onBack={() => setCurrentStep(1)}
-            onNext={(chosenCols) => {
+            onNext={async (chosenCols) => {
+              const backendId = activeDataset?.backendId
+              if (backendId) {
+                try {
+                  await datasetApi.selectColumns(backendId, chosenCols)
+                  const rec = await analysisApi.recommend(backendId, chosenCols)
+                  const types = rec?.recommended_analysis_types || []
+                  const supported = new Set(types)
+                  // Prefer a trend view when a date column was chosen and descriptive is supported
+                  const hasDate = activeDataset?.columns.some((c) => chosenCols.includes(c.name) && c.dataType === "date")
+                  const recommendedId = hasDate && supported.has(ANALYSIS_TYPE_MAP.trend)
+                    ? "trend"
+                    : types.map(backendTypeToFrontendId).find(Boolean)
+                  if (recommendedId) {
+                    setActiveDataset((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            recommendedAnalysisId: recommendedId,
+                            analysisReason: `Server analysis supports: ${types.join(", ")}.`,
+                          }
+                        : prev
+                    )
+                  }
+                } catch (err: any) {
+                  setModalState({
+                    isOpen: true,
+                    title: "Column Selection",
+                    message: err?.message || "The selected columns could not be validated.",
+                  })
+                  return
+                }
+              }
               setConfirmedColumns(chosenCols)
               setCurrentStep(3)
             }}

@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { DecorativeBackground } from "@/components/decorative-background";
 import { AppFooter } from "@/components/app-footer";
-import { setLoggedIn, saveStoredUserProfile } from "@/lib/auth";
+import { setLoggedIn, saveStoredUserProfile, registerWithBackend } from "@/lib/auth";
 import { useTheme, toggleTheme } from "@/lib/theme";
 
 const EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
@@ -86,22 +86,26 @@ export function SignUpView({ onSuccess }: { onSuccess?: () => void }) {
     }
 
     setLoading(true);
-    setTimeout(() => {
-      const username = email.split("@")[0].replace(/[^a-zA-Z0-9_-]/g, "") || "user";
-      saveStoredUserProfile({
-        displayName: fullName.trim(),
-        username: username,
-        email: email.trim(),
+    const username = email.split("@")[0].replace(/[^a-zA-Z0-9_-]/g, "") || "user";
+    // Backend registration: POST /register then POST /login
+    registerWithBackend({
+      username,
+      email: email.trim(),
+      password,
+      displayName: fullName.trim(),
+    })
+      .then(() => {
+        setLoading(false);
+        if (onSuccess) {
+          onSuccess();
+        } else {
+          router.push("/");
+        }
+      })
+      .catch((err: any) => {
+        setLoading(false);
+        setError(err?.message || "Could not create your account. Please try again.");
       });
-      setLoggedIn(true);
-      setLoading(false);
-
-      if (onSuccess) {
-        onSuccess();
-      } else {
-        router.push("/");
-      }
-    }, 450);
   };
 
   const handleSocialSignUp = (provider: "Google" | "GitHub") => {

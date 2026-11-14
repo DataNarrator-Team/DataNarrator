@@ -36,7 +36,7 @@ import {
 } from "lucide-react";
 import { DecorativeBackground } from "@/components/decorative-background";
 import { AppFooter } from "@/components/app-footer";
-import { setLoggedIn, saveStoredUserProfile, useAuth } from "@/lib/auth";
+import { setLoggedIn, saveStoredUserProfile, useAuth, loginWithBackend, registerWithBackend } from "@/lib/auth";
 import { useTheme, toggleTheme } from "@/lib/theme";
 
 const EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
@@ -1291,51 +1291,28 @@ export function AuthView({ onSuccess }: { onSuccess?: (role?: "admin" | "user") 
     }
 
     setLoading(true);
-    // ==============================================================================
-    // 🟢 START DEMO / SIMULATION CODE [Will be replaced with backend API integration]
-    // Simulated authentication network latency & local profile caching
-    // Replace with real backend API call: await fetch('/api/auth/login', { ... })
-    // ==============================================================================
-    setTimeout(() => {
-      setLoggedIn(true);
-
-      const trimmedId = identifier.trim().toLowerCase();
-      const trimmedEmail = email.trim().toLowerCase();
-      const isAdminLogin = trimmedId === "admin" || (!isSignUp && (trimmedId.includes("admin") || trimmedEmail.includes("admin")));
-      const userRole: "admin" | "user" = isAdminLogin ? "admin" : "user";
-
-      if (isSignUp) {
-        saveStoredUserProfile({
-          displayName: displayName.trim(),
+    // Backend authentication: POST /login (and POST /register when signing up)
+    const authRequest = isSignUp
+      ? registerWithBackend({
           username: identifier.trim(),
           email: email.trim(),
-          role: userRole,
-        });
-      } else {
-        const isUserDemo = trimmedId === "user";
-        saveStoredUserProfile({
-          displayName: isAdminLogin
-            ? "System Administrator"
-            : isUserDemo
-            ? "Demo User"
-            : (identifier.trim() || "Shahad Saif"),
-          username: identifier.trim(),
-          email: isAdminLogin
-            ? "admin@datanarrator.ai"
-            : (identifier.includes("@") ? identifier.trim() : `${identifier.trim() || "user"}@example.com`),
-          role: userRole,
-        });
-      }
+          password,
+          displayName: displayName.trim(),
+        })
+      : loginWithBackend(identifier.trim(), password);
 
-      setLoading(false);
-      setIsLoginModalOpen(false);
-      if (onSuccess) {
-        onSuccess(userRole);
-      }
-    }, 450);
-    // ==============================================================================
-    // 🔴 END DEMO / SIMULATION CODE
-    // ==============================================================================
+    authRequest
+      .then((profile) => {
+        setLoading(false);
+        setIsLoginModalOpen(false);
+        if (onSuccess) {
+          onSuccess(profile.role === "admin" ? "admin" : "user");
+        }
+      })
+      .catch((err: any) => {
+        setLoading(false);
+        setError(err?.message || "Authentication failed. Please try again.");
+      });
   };
 
   const scrollToFeatures = () => {

@@ -37,6 +37,27 @@ import {
   rejectAccountDeletionRequest,
   EVENT_DELETION_REQUESTS_CHANGED,
 } from "@/lib/auth";
+import { adminApi, BackendUser } from "@/lib/api";
+
+const AVATAR_COLORS = ["bg-blue-600", "bg-purple-600", "bg-emerald-600", "bg-amber-600", "bg-teal-600", "bg-indigo-600"];
+
+/** Map GET /admin/users rows to the ManagedUser model used by this screen */
+function mapBackendUser(u: BackendUser, previous?: ManagedUser): ManagedUser {
+  return {
+    id: String(u.id),
+    name: previous?.name || u.username,
+    username: u.username,
+    email: u.email,
+    role: u.role === "admin" ? "admin" : "user",
+    status: previous?.status || "active",
+    joinedDate: previous?.joinedDate || "-",
+    lastActive: previous?.lastActive || "-",
+    datasetsCount: previous?.datasetsCount || 0,
+    avatarBg: previous?.avatarBg || AVATAR_COLORS[u.id % AVATAR_COLORS.length],
+    deletionReason: previous?.deletionReason,
+    deletionRequestedAt: previous?.deletionRequestedAt,
+  };
+}
 
 export interface ManagedUser {
   id: string;
@@ -152,7 +173,24 @@ export function AdminUserManagement({ onNavigateToRequests }: { onNavigateToRequ
   // Load from localStorage or use defaults, and overlay pending deletion requests
   // In real backend, this will be an API fetch (e.g. GET /api/admin/users)
   // ==============================================================================
+  // Backend: GET /admin/users
+  const loadBackendUsers = () =>
+    adminApi.listUsers().then(({ users: list }) => {
+      setUsers((prev) => {
+        const byId = new Map(prev.map((u) => [u.id, u]));
+        return list.map((u) => mapBackendUser(u, byId.get(String(u.id))));
+      });
+    });
+
   useEffect(() => {
+    loadBackendUsers().catch((err) => {
+      showToast(err?.message || "Could not load users from the server.", "error");
+    });
+  }, []);
+
+  useEffect(() => {
+    // Demo fallback disabled: users come from the backend (see loadBackendUsers)
+    if (true) return;
     const loadAndSyncUsers = () => {
       try {
         const stored = localStorage.getItem(STORAGE_KEY_ADMIN_USERS);
@@ -261,6 +299,8 @@ export function AdminUserManagement({ onNavigateToRequests }: { onNavigateToRequ
   // Handle Deletion Requests Review
   const handleApproveDeletionRequest = (user: ManagedUser) => {
     approveAccountDeletionRequest(user.username);
+    // DELETE /admin/users/:id
+    adminApi.deleteUser(Number(user.id)).catch((err) => showToast(err?.message || "Delete failed.", "error"));
     const updated = users.filter((u) => u.id !== user.id);
     updateUsers(updated);
     setReviewingDeletionUser(null);
@@ -286,7 +326,27 @@ export function AdminUserManagement({ onNavigateToRequests }: { onNavigateToRequ
   };
 
   // Handle Add User
-  const handleAddUser = (newUser: Omit<ManagedUser, "id" | "joinedDate" | "lastActive" | "datasetsCount" | "avatarBg">) => {
+  const handleAddUser = (newUser: Omit<ManagedUser, "id" | "joinedDate" | "lastActive" | "datasetsCount" | "avatarBg"> & { password?: string }) => {
+    // POST /admin/users
+    adminApi
+      .addUser(newUser.username, newUser.email, newUser.password || "")
+      .then((res: any) => {
+        const created = mapBackendUser(res.user, {
+          ...(newUser as any),
+          joinedDate: new Date().toISOString().split("T")[0],
+          lastActive: "Just now",
+          datasetsCount: 0,
+          avatarBg: AVATAR_COLORS[Number(res.user?.id || 0) % AVATAR_COLORS.length],
+        });
+        setUsers((prev) => [created, ...prev.filter((u) => u.id !== created.id)]);
+        setIsAddModalOpen(false);
+        showToast(`User account "${created.name}" created successfully!`, "success");
+      })
+      .catch((err) => showToast(err?.message || "User could not be created.", "error"));
+  };
+
+  // Previous local-only implementation (kept for reference)
+  const handleAddUserLocal = (newUser: Omit<ManagedUser, "id" | "joinedDate" | "lastActive" | "datasetsCount" | "avatarBg">) => {
     const exists = users.some(
       (u) => u.username.toLowerCase() === newUser.username.toLowerCase() || u.email.toLowerCase() === newUser.email.toLowerCase()
     );
@@ -334,13 +394,20 @@ export function AdminUserManagement({ onNavigateToRequests }: { onNavigateToRequ
       return;
     }
 
-    const updated = users.filter((u) => u.id !== userToDelete.id);
-    updateUsers(updated);
-    if (viewingUser && viewingUser.id === userToDelete.id) {
-      setViewingUser(null);
-    }
-    showToast(`User account "${userToDelete.name}" permanently deleted!`, "success");
+    // DELETE /admin/users/:id
+    const target = userToDelete;
     setUserToDelete(null);
+    adminApi
+      .deleteUser(Number(target.id))
+      .then(() => {
+        const updated = users.filter((u) => u.id !== target.id);
+        updateUsers(updated);
+        if (viewingUser && viewingUser.id === target.id) {
+          setViewingUser(null);
+        }
+        showToast(`User account "${target.name}" permanently deleted!`, "success");
+      })
+      .catch((err) => showToast(err?.message || "User could not be deleted.", "error"));
   };
 
   // Toggle user status quickly (active / suspended)
@@ -1022,7 +1089,7 @@ function AddUserModal({
 }: {
   isOpen: boolean;
   onClose: () => void;
-  onAdd: (data: Omit<ManagedUser, "id" | "joinedDate" | "lastActive" | "datasetsCount" | "avatarBg">) => void;
+  onAdd: (data: Omit<ManagedUser, "id" | "joinedDate" | "lastActive" | "datasetsCount" | "avatarBg"> & { password?: string }) => void;
 }) {
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
@@ -1051,6 +1118,7 @@ function AddUserModal({
       email: email.trim().toLowerCase(),
       role,
       status,
+      password: tempPassword,
     });
   };
 

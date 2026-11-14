@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { authApi, settingsApi, setToken, getToken } from "@/lib/api";
 
 export const STORAGE_KEY_AUTH = "datanarrator_user_logged_in";
 export const STORAGE_KEY_USER_PROFILE = "datanarrator_user_profile";
@@ -69,7 +70,7 @@ export function getIsLoggedIn(): boolean {
   try {
     const sessionVal = sessionStorage.getItem(STORAGE_KEY_AUTH);
     const localVal = localStorage.getItem(STORAGE_KEY_AUTH);
-    return sessionVal === "true" || localVal === "true";
+    return (sessionVal === "true" || localVal === "true") && !!getToken();
   } catch (e) {
     return false;
   }
@@ -83,6 +84,7 @@ export function setLoggedIn(loggedIn: boolean): void {
     } else {
       sessionStorage.removeItem(STORAGE_KEY_AUTH);
       localStorage.removeItem(STORAGE_KEY_AUTH);
+      setToken(null);
     }
     window.dispatchEvent(new Event(EVENT_AUTH_CHANGED));
   } catch (e) {
@@ -91,7 +93,63 @@ export function setLoggedIn(loggedIn: boolean): void {
 }
 
 export function logout(): void {
+  // Notify backend (stateless JWT) then clear the local session
+  if (getToken()) settingsApi.logout().catch(() => {});
   setLoggedIn(false);
+}
+
+// ==============================================================================
+// Backend authentication (Flask /login, /register, /settings/profile)
+// ==============================================================================
+
+/** Log in against the backend, store the JWT and cache the user profile. */
+export async function loginWithBackend(identifier: string, password: string): Promise<UserProfile> {
+  const result = await authApi.login(identifier.trim(), password);
+  setToken(result.access_token);
+  const role: "admin" | "user" = result.role === "admin" ? "admin" : "user";
+
+  let profile: UserProfile = {
+    displayName: identifier.trim(),
+    username: identifier.trim(),
+    email: identifier.includes("@") ? identifier.trim() : "",
+    role,
+  };
+  try {
+    const { profile: p } = await settingsApi.getProfile();
+    profile = {
+      displayName: p.display_name || p.username,
+      username: p.username,
+      email: p.email,
+      role,
+    };
+  } catch (e) {
+    // keep the minimal profile
+  }
+
+  saveStoredUserProfile(profile);
+  setLoggedIn(true);
+  return profile;
+}
+
+/** Register a new account on the backend, then log in with it. */
+export async function registerWithBackend(data: {
+  username: string;
+  email: string;
+  password: string;
+  displayName?: string;
+}): Promise<UserProfile> {
+  await authApi.register(data.username.trim(), data.email.trim(), data.password);
+  const profile = await loginWithBackend(data.username, data.password);
+  if (data.displayName && data.displayName.trim() && data.displayName.trim() !== profile.displayName) {
+    try {
+      await settingsApi.updateProfile(profile.username, data.displayName.trim());
+      profile.displayName = data.displayName.trim();
+      saveStoredUserProfile({ displayName: profile.displayName });
+    } catch (e) {
+      // display name is optional
+    }
+  }
+  return profile;
 }
 
 // ==============================================================================
@@ -292,6 +350,6 @@ export function useAuth() {
     profile,
     updateProfile: (p: Partial<UserProfile>) => saveStoredUserProfile(p),
     login: () => setLoggedIn(true),
-    logout: () => setLoggedIn(false),
+    logout: () => logout(),
   };
 }
