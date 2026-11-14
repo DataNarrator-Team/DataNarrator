@@ -44,7 +44,9 @@ import {
 import {
   useAuth,
   userDeleteAccount,
+  logout,
 } from "@/lib/auth"
+import { settingsApi } from "@/lib/api"
 import { AppFooter } from "@/components/app-footer"
 
 export function SettingsWorkspace() {
@@ -118,6 +120,18 @@ export function SettingsWorkspace() {
   const [paletteSaved, setPaletteSaved] = useState(false)
   const [previewChartType, setPreviewChartType] = useState<"trend" | "bars" | "donut">("trend")
 
+  // Load the profile from the backend (GET /settings/profile)
+  useEffect(() => {
+    settingsApi
+      .getProfile()
+      .then(({ profile: p }) => {
+        setDisplayName(p.display_name || p.username)
+        setUsername(p.username)
+        updateProfile({ displayName: p.display_name || p.username, username: p.username, email: p.email })
+      })
+      .catch(() => {})
+  }, [])
+
   useEffect(() => {
     setPalettePreset(getStoredPalette())
     setThemeMode(getStoredTheme())
@@ -137,6 +151,8 @@ export function SettingsWorkspace() {
   function handleSelectPalette(key: ChartPaletteKey) {
     setPalettePreset(key)
     saveStoredPalette(key)
+    // "accessible" is a frontend-only palette
+    if (key !== "accessible") settingsApi.setChartColor(key).catch(() => {})
     setPaletteSaved(true)
     setTimeout(() => setPaletteSaved(false), 2500)
   }
@@ -145,6 +161,7 @@ export function SettingsWorkspace() {
     const next = themeMode === "light" ? "dark" : "light"
     setThemeMode(next)
     applyTheme(next)
+    settingsApi.setTheme(next).catch(() => {})
     setPaletteSaved(true)
     setTimeout(() => setPaletteSaved(false), 2500)
   }
@@ -155,11 +172,25 @@ export function SettingsWorkspace() {
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [deleteConfirmationText, setDeleteConfirmationText] = useState("")
 
+  const [deletePassword, setDeletePassword] = useState("")
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+
+  // DELETE /settings/account (requires the current password)
   const handleConfirmUserDelete = () => {
     if (deleteConfirmationText !== "DELETE" || !profile?.username) return
-    userDeleteAccount(profile)
-    alert("Your account has been deleted. You will now be redirected.")
-    window.location.href = "/"
+    if (!deletePassword) {
+      setDeleteError("Please enter your current password.")
+      return
+    }
+    setDeleteError(null)
+    settingsApi
+      .deleteAccount(deletePassword)
+      .then(() => {
+        logout()
+        alert("Your account has been deleted. You will now be redirected.")
+        window.location.href = "/"
+      })
+      .catch((err) => setDeleteError(err?.message || "Account could not be deleted."))
   }
 
   // Quick navigation anchors
@@ -171,6 +202,8 @@ export function SettingsWorkspace() {
     if (file) {
       const url = URL.createObjectURL(file)
       setAvatarPreview(url)
+      // POST /settings/profile/photo
+      settingsApi.uploadPhoto(file).catch((err) => alert(err?.message || "Photo upload failed."))
     }
   }
 
@@ -209,13 +242,18 @@ export function SettingsWorkspace() {
 
     if (hasError) return
 
-    updateProfile({
-      displayName: trimmedName,
-      username: trimmedUsername,
-    })
-
-    setProfileSaved(true)
-    setTimeout(() => setProfileSaved(false), 3000)
+    // PATCH /settings/profile
+    settingsApi
+      .updateProfile(trimmedUsername, trimmedName)
+      .then(() => {
+        updateProfile({
+          displayName: trimmedName,
+          username: trimmedUsername,
+        })
+        setProfileSaved(true)
+        setTimeout(() => setProfileSaved(false), 3000)
+      })
+      .catch((err) => setUsernameError(err?.message || "Profile could not be saved."))
   }
 
   function handleUpdatePassword() {
@@ -231,11 +269,17 @@ export function SettingsWorkspace() {
       setPasswordFeedback("Passwords do not match")
       return
     }
-    setPasswordFeedback("success")
-    setCurrentPassword("")
-    setNewPassword("")
-    setConfirmPassword("")
-    setTimeout(() => setPasswordFeedback(null), 3500)
+    // PATCH /settings/password
+    settingsApi
+      .changePassword(currentPassword, newPassword, confirmPassword)
+      .then(() => {
+        setPasswordFeedback("success")
+        setCurrentPassword("")
+        setNewPassword("")
+        setConfirmPassword("")
+        setTimeout(() => setPasswordFeedback(null), 3500)
+      })
+      .catch((err) => setPasswordFeedback(err?.message || "Password could not be updated."))
   }
 
   return (
@@ -793,6 +837,7 @@ export function SettingsWorkspace() {
                     onChange={(e) => {
                       const val = e.target.value as any
                       setCurrency(val)
+                      settingsApi.setCurrency(val).catch(() => {})
                       try {
                         localStorage.setItem("datanarrutor_currency_format", val)
                       } catch {}
@@ -817,7 +862,11 @@ export function SettingsWorkspace() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => setCompactNumbers(!compactNumbers)}
+                    onClick={() => {
+                      const next = !compactNumbers
+                      setCompactNumbers(next)
+                      settingsApi.setNumberDisplay(next ? "compact" : "full").catch(() => {})
+                    }}
                     className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                       compactNumbers ? "bg-[#4a7ff7]" : "bg-slate-200 dark:bg-zinc-700"
                     }`}
@@ -1223,6 +1272,19 @@ export function SettingsWorkspace() {
                 placeholder="Type DELETE"
                 className="w-full rounded-lg border border-slate-200 dark:border-zinc-700 bg-white dark:bg-[#282b35] px-3 py-1.5 text-xs font-mono font-bold text-slate-800 dark:text-zinc-100 focus:border-rose-500 focus:outline-none"
               />
+              <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300 mt-3 mb-1">
+                Current password:
+              </label>
+              <input
+                type="password"
+                value={deletePassword}
+                onChange={(e) => setDeletePassword(e.target.value)}
+                placeholder="Enter your password"
+                className="w-full rounded-lg border border-slate-200 dark:border-zinc-700 bg-white dark:bg-[#282b35] px-3 py-1.5 text-xs text-slate-800 dark:text-zinc-100 focus:border-rose-500 focus:outline-none"
+              />
+              {deleteError && (
+                <p className="mt-2 text-[11px] font-semibold text-rose-600 dark:text-rose-400">{deleteError}</p>
+              )}
             </div>
 
             <div className="mt-5 flex items-center justify-end gap-2.5">

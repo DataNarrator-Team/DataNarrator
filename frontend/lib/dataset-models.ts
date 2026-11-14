@@ -97,6 +97,7 @@ export interface ColumnCombinationInsight {
 
 export interface DatasetMeta {
   id: string
+  backendId?: number // dataset_id in the Flask backend (set for real uploads)
   name: string
   size: string
   type: string

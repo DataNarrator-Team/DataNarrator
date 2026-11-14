@@ -36,8 +36,11 @@ import {
   BarItem,
   DonutSegment,
   BoxPlotData,
+  ScatterPoint,
 } from "@/lib/dataset-models"
 import { getDemoQuickGoals, QuickGoalExample } from "@/components/column-recommendation-step"
+import { analysisApi, ANALYSIS_TYPE_MAP, ApiError } from "@/lib/api"
+import { applyAnalysisResultToStory, mergeVisualization, CHART_ID_TO_VISUALIZATION } from "@/lib/backend-mappers"
 import {
   CHART_PALETTES,
   ChartPalette,
@@ -73,11 +76,13 @@ function TopNavigation({
   datasetName,
   rowCount,
   onBack,
+  backendExport,
 }: {
   datasetName?: string
   rowCount?: number
   onBack: () => void
   onNewProject?: () => void
+  backendExport?: { sessionId: number; chartId: number; visualizationType: string } | null
 }) {
   const [exportOpen, setExportOpen] = useState(false)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
@@ -107,6 +112,16 @@ function TopNavigation({
   const handleExportPDF = (e?: React.MouseEvent) => {
     e?.stopPropagation()
     setExportOpen(false)
+
+    // Backend report: POST /analysis/export/pdf
+    if (backendExport) {
+      const cleanName = (datasetName || "DataNarrator").replace(/\.[^/.]+$/, "")
+      analysisApi
+        .exportPdf(backendExport.sessionId, backendExport.chartId, backendExport.visualizationType, `${cleanName}-report.pdf`)
+        .then(() => setToastMessage("PDF report downloaded successfully!"))
+        .catch((err) => setToastMessage(err?.message || "PDF export failed."))
+      return
+    }
 
     try {
       const cleanName = (datasetName || "Customer_Retention_Cohort").replace(/\.[^/.]+$/, "")
@@ -203,6 +218,16 @@ function TopNavigation({
   const handleExportPNG = (e?: React.MouseEvent) => {
     e?.stopPropagation()
     setExportOpen(false)
+
+    // Backend chart image: POST /analysis/export/png
+    if (backendExport) {
+      const cleanName = (datasetName || "DataNarrator").replace(/\.[^/.]+$/, "")
+      analysisApi
+        .exportPng(backendExport.sessionId, backendExport.chartId, backendExport.visualizationType, `${cleanName}-chart.png`)
+        .then(() => setToastMessage("PNG image downloaded successfully!"))
+        .catch((err) => setToastMessage(err?.message || "PNG export failed."))
+      return
+    }
 
     try {
       const cleanName = (datasetName || "Customer_Retention_Cohort").replace(/\.[^/.]+$/, "")
@@ -1184,15 +1209,28 @@ function LollipopGraphic({
 function ScatterGraphic({
   isBubble,
   palette,
+  data,
 }: {
   isBubble?: boolean
   palette?: ChartPalette
+  data?: ScatterPoint[]
 }) {
   const pColor = palette?.primary || "#4a7ff7"
   const sColor = palette?.secondary || "#e99842"
   const tColor = palette?.textHighlight || "#b86b1c"
 
-  const points = [
+  // Real data (0-100 scaled) mapped into the SVG plotting area
+  const dataPoints: { x: number; y: number; r: number; label: string; isWarm?: boolean }[] | null =
+    data && data.length > 0
+      ? data.map((p, i) => ({
+          x: 55 + (p.x / 100) * 355,
+          y: 160 - (p.y / 100) * 130,
+          r: 6 + (i % 5) * 2,
+          label: p.name,
+        }))
+      : null
+
+  const points = dataPoints || [
     { x: 65, y: 145, r: 7, label: "P1" },
     { x: 110, y: 130, r: 10, label: "P2" },
     { x: 155, y: 110, r: 8, label: "P3" },
@@ -1438,7 +1476,7 @@ function ChartCanvas({
       )}
 
       {analysisTypeId === "correlation" && (
-        <ScatterGraphic isBubble={activeChartId === "bubble"} palette={palette} />
+        <ScatterGraphic isBubble={activeChartId === "bubble"} palette={palette} data={storyConfig.scatterData} />
       )}
     </div>
   )
@@ -1462,7 +1500,7 @@ function ChartContainer({
   const sColor = palette?.secondary || "#e99842"
 
   return (
-    <div className="h-full rounded-2xl border border-slate-200/80 dark:border-zinc-700 bg-white dark:bg-[#22252c] p-4.5 shadow-2xs flex flex-col justify-between">
+    <div className="rounded-2xl border border-slate-200/80 dark:border-zinc-700 bg-white dark:bg-[#22252c] p-4.5 shadow-2xs flex flex-col justify-between">
       <div className="mb-3 flex flex-wrap items-center justify-between border-b border-slate-100 dark:border-zinc-700/60 pb-2.5 gap-2">
         <div className="flex items-center gap-2">
           <span className="size-2 rounded-full" style={{ backgroundColor: sColor }} />
@@ -1958,12 +1996,115 @@ export function StoryDashboard({
     }
   }, [selectedChartId, analysisTypeId])
 
+  // ==============================================================================
+  // Backend analysis: POST /analysis/execute (+ /analysis/visualization on chart switch)
+  // ==============================================================================
+  const backendId = datasetMeta?.backendId
+  const [backendResult, setBackendResult] = useState<any>(null)
+  const [backendStatus, setBackendStatus] = useState<"idle" | "loading" | "error" | "done">("idle")
+  const [backendError, setBackendError] = useState<string | null>(null)
+  const [extraVisualizations, setExtraVisualizations] = useState<Record<string, any>>({})
+  const [runCounter, setRunCounter] = useState(0)
+
+  useEffect(() => {
+    if (!backendId || confirmedColumns.length === 0) return
+    let cancelled = false
+    setBackendStatus("loading")
+    setBackendError(null)
+    setBackendResult(null)
+    setExtraVisualizations({})
+
+    const requested = ANALYSIS_TYPE_MAP[analysisTypeId] || "descriptive"
+    analysisApi
+      .execute(backendId, confirmedColumns, requested)
+      .catch((err: any) => {
+        // Retry with a type the backend supports for these columns
+        const supported: string[] = err instanceof ApiError ? err.data?.supported_analysis_types || [] : []
+        if (supported.length && !supported.includes(requested)) {
+          return analysisApi.execute(backendId, confirmedColumns, supported[0])
+        }
+        throw err
+      })
+      .then((result) => {
+        if (cancelled) return
+        setBackendResult(result)
+        setBackendStatus("done")
+      })
+      .catch((err: any) => {
+        if (cancelled) return
+        setBackendError(err?.message || "The analysis could not be completed.")
+        setBackendStatus("error")
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [backendId, analysisTypeId, confirmedColumns.join("|"), runCounter])
+
+  // Find which backend chart (1-3) offers the active visualization type
+  const activeVisualizationType = CHART_ID_TO_VISUALIZATION[activeChartId]
+  const backendChartForActive = backendResult?.charts?.find((c: any) =>
+    (c.visualization_options || []).includes(activeVisualizationType)
+  )
+
+  useEffect(() => {
+    if (!backendResult || !backendChartForActive || !activeVisualizationType) return
+    if (backendChartForActive.selected_visualization === activeVisualizationType) return
+    if (extraVisualizations[activeVisualizationType]) return
+    analysisApi
+      .visualization(backendResult.analysis_session_id, backendChartForActive.chart_id, activeVisualizationType)
+      .then((res: any) => {
+        setExtraVisualizations((prev) => ({ ...prev, [activeVisualizationType]: res.visualization }))
+      })
+      .catch(() => {})
+  }, [backendResult, activeVisualizationType])
+
+  // Chart options the server actually produced (frontend option + its analysis family)
+  const backendOptions: { option: CompatibleChartOption; family: string }[] = []
+  ;(backendResult?.charts || []).forEach((c: any) => {
+    ;(c.visualization_options || []).forEach((vizType: string) => {
+      const chartId = Object.keys(CHART_ID_TO_VISUALIZATION).find((k) => CHART_ID_TO_VISUALIZATION[k] === vizType)
+      if (!chartId || backendOptions.some((o) => o.option.id === chartId)) return
+      for (const [family, list] of Object.entries(COMPATIBLE_CHARTS_BY_ANALYSIS)) {
+        const option = list.find((o) => o.id === chartId)
+        if (option) {
+          backendOptions.push({ option, family })
+          break
+        }
+      }
+    })
+  })
+
+  // If the selected chart type was not produced by the server, show the first server chart
+  useEffect(() => {
+    if (!backendOptions.length) return
+    if (!backendOptions.some((o) => o.option.id === activeChartId)) {
+      const firstSelected = backendResult.charts
+        .map((c: any) => Object.keys(CHART_ID_TO_VISUALIZATION).find((k) => CHART_ID_TO_VISUALIZATION[k] === c.selected_visualization))
+        .find((id: string | undefined) => id && backendOptions.some((o) => o.option.id === id))
+      setActiveChartId(firstSelected || backendOptions[0].option.id)
+    }
+  }, [backendResult])
+
+  const switcherOptions = backendOptions.length ? backendOptions.map((o) => o.option) : compatibleList
+  const effectiveAnalysisTypeId =
+    backendOptions.find((o) => o.option.id === activeChartId)?.family || analysisTypeId
+
+  const backendExport = backendResult?.analysis_session_id && backendResult?.charts?.length
+    ? {
+        sessionId: backendResult.analysis_session_id,
+        chartId: (backendChartForActive || backendResult.charts[0]).chart_id,
+        visualizationType: backendChartForActive
+          ? activeVisualizationType
+          : backendResult.charts[0].selected_visualization,
+      }
+    : null
+
   const quickGoals = getDemoQuickGoals(datasetMeta?.name)
   // Detect active goals matching confirmed columns
   const activeGoals = quickGoals.filter(
     (g) => g.columns.length > 0 && g.columns.every((c) => confirmedColumns.includes(c))
   )
-  const isMultiGoal = activeGoals.length >= 2
+  const isMultiGoal = !backendId && activeGoals.length >= 2
 
   // Stories for both goals
   const goalStories = activeGoals.map((g) => {
@@ -1998,8 +2139,14 @@ export function StoryDashboard({
     ? getSynergySummary(datasetMeta?.name, activeGoals[0], activeGoals[1])
     : undefined
 
-  const storyConfig = getDashboardStory(datasetMeta || null, analysisTypeId, confirmedColumns)
-  const currentOption = compatibleList.find((c) => c.id === activeChartId) || compatibleList[0]
+  let storyConfig = getDashboardStory(datasetMeta || null, analysisTypeId, confirmedColumns)
+  if (backendResult) {
+    storyConfig = applyAnalysisResultToStory(storyConfig, backendResult, datasetMeta)
+    if (activeVisualizationType && extraVisualizations[activeVisualizationType]) {
+      storyConfig = mergeVisualization(storyConfig, extraVisualizations[activeVisualizationType])
+    }
+  }
+  const currentOption = switcherOptions.find((c) => c.id === activeChartId) || switcherOptions[0]
   const activePalette = CHART_PALETTES[paletteKey] || CHART_PALETTES.warm
 
   // Combine top metrics if multi-goal
@@ -2019,12 +2166,30 @@ export function StoryDashboard({
         rowCount={datasetMeta?.rowCount}
         onBack={onBack}
         onNewProject={onNewProject}
+        backendExport={backendExport}
       />
 
       <div className="mb-6">
         <h2 className="text-2xl font-bold text-slate-800 dark:text-zinc-100 tracking-tight">
           {isMultiGoal ? "Dual-Objective Visual Storyboard" : "Automated Visual Storyboard"}
         </h2>
+        {backendStatus === "loading" && (
+          <p className="mt-2 text-sm text-[#4a7ff7] font-medium animate-pulse">
+            Running analysis and generating AI insights on the server...
+          </p>
+        )}
+        {backendStatus === "error" && (
+          <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-rose-200 dark:border-rose-900/60 bg-rose-50 dark:bg-rose-950/40 px-4 py-2.5 text-sm text-rose-700 dark:text-rose-300">
+            <span>{backendError}</span>
+            <button
+              type="button"
+              onClick={() => setRunCounter((n) => n + 1)}
+              className="rounded-lg bg-rose-600 px-3 py-1 text-xs font-semibold text-white hover:bg-rose-700 cursor-pointer"
+            >
+              Retry
+            </button>
+          </div>
+        )}
       </div>
 
       <StatsCardsRow metrics={displayMetrics} palette={activePalette} />
@@ -2129,14 +2294,14 @@ export function StoryDashboard({
       ) : (
         <>
           <VisualizationSwitcher
-            compatibleOptions={compatibleList}
+            compatibleOptions={switcherOptions}
             activeChartId={activeChartId}
             onSelectChart={(newId) => setActiveChartId(newId)}
             palette={activePalette}
           />
 
           <ChartContainer
-            analysisTypeId={analysisTypeId}
+            analysisTypeId={effectiveAnalysisTypeId}
             activeChartId={activeChartId}
             activeTitle={currentOption?.title || "Active Chart"}
             storyConfig={storyConfig}
