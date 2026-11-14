@@ -50,3 +50,8 @@ If the backend runs somewhere else, start the frontend with
 
 The built-in sample datasets on the upload page are still offline demos and
 do not call the backend.
+
+### Further documentation
+
+- [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md): how the frontend is linked to the backend and the visualizations (a learning guide for junior developers)
+- [`docs/ISSUES_AND_ENHANCEMENTS.md`](docs/ISSUES_AND_ENHANCEMENTS.md): known issues and ideas to implement later

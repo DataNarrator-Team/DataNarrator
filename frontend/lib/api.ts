@@ -210,7 +210,7 @@ export const datasetApi = {
 
 /** Frontend analysis ids -> backend analysis types */
 export const ANALYSIS_TYPE_MAP: Record<string, string> = {
-  trend: "descriptive",
+  trend: "comparative", // backend only allows line/area/step charts under "comparative"
   comparison: "comparative",
   desc_freq: "descriptive",
   desc_numeric: "distribution",

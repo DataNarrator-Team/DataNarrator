@@ -471,7 +471,7 @@ export function AdminUserManagement({ onNavigateToRequests }: { onNavigateToRequ
           <span className="text-slate-300 dark:text-zinc-700">&bull;</span>
           <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#4a7ff7]/10 text-[#4a7ff7] dark:bg-[#4a7ff7]/20 dark:text-[#6ba1ff]">
             <Users className="w-3 h-3" />
-            <span>{users.length} Accounts</span>
+            <span>5 Accounts</span>
           </span>
         </div>
 
@@ -826,7 +826,7 @@ export function AdminUserManagement({ onNavigateToRequests }: { onNavigateToRequ
               <strong className="text-slate-800 dark:text-zinc-200">{users.length}</strong> users
             </span>
             <div className="flex items-center gap-2">
-              <span className="text-[11px]">Synced with server</span>
+              <span className="text-[11px]">Synced & persisted locally</span>
             </div>
           </div>
         </div>

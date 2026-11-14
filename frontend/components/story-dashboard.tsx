@@ -1500,7 +1500,7 @@ function ChartContainer({
   const sColor = palette?.secondary || "#e99842"
 
   return (
-    <div className="rounded-2xl border border-slate-200/80 dark:border-zinc-700 bg-white dark:bg-[#22252c] p-4.5 shadow-2xs flex flex-col justify-between">
+    <div className="h-full rounded-2xl border border-slate-200/80 dark:border-zinc-700 bg-white dark:bg-[#22252c] p-4.5 shadow-2xs flex flex-col justify-between">
       <div className="mb-3 flex flex-wrap items-center justify-between border-b border-slate-100 dark:border-zinc-700/60 pb-2.5 gap-2">
         <div className="flex items-center gap-2">
           <span className="size-2 rounded-full" style={{ backgroundColor: sColor }} />
